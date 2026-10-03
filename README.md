@@ -8,7 +8,8 @@ ships in mods, as a byte-identical vendored copy.
 | File | Purpose |
 | --- | --- |
 | `lint.py` | Static lint of mod sources, with a baseline that only ratchets down |
-| `lint-repos.json` | Repos to scan: the latest published checkouts (read only), their globs and allowed globals |
+| `metrics.py` | Code-structure measurements for `lint.py` (R10-R15): cognitive complexity, function facts, active locals, duplicated code |
+| `lint-repos.json` | Repos to scan: the latest published checkouts (read only), their globs and allowed globals; optional structure `limits` and `vendored` names |
 | `lint-baseline.json` | Known violations: count per (repo, kind, file, rule, line text) |
 | `hostile_vm.lua` | Canonical test helper; copy it byte-identical to a mod's `tests/hostile_vm.lua` |
 | `runtime/bingus_runtime.lua` | Canonical shared runtime (layer 1); copy it byte-identical into a mod's `src/` |
@@ -27,9 +28,52 @@ ships in mods, as a byte-identical vendored copy.
 | R7 `loader-version` | A numeric comparison with the loader's `version`: tables named `*loader*`, aliases of `CowboyBingusModLoader`, or `rawget(_G, '...Loader').version`. `type(loader.version)` is fine. | The loader's internal version differs from its release number (v18 reports 17). Check capabilities instead: `loader.api`, `loader.jit`, functions. |
 | R8 `global-write` (sources only) | `GSET` instructions in the compiled bytecode, plus `rawset(_G, 'x', ...)`, `_G.x =` and `_G['x'] =`. `update`, `shutdown`, `render` and the repo's `allowed_globals` are exempt. | Any other global leaks into the shared state, like CV's accidental `_`. |
 | R9 `catch-previous` (sources only) | `pcall`/`xpcall` of `previous...`/`original...`, and `error((...), 0)` | Catching another layer's error and rethrowing it from the mod's frame makes vanilla errors look like mod errors. |
+| R10 `cognitive-complexity` (sources only) | A function with cognitive complexity above 15 (see below) | Deeply nested branching is hard to follow and to test. The score grows with nesting, not length. Split the function into named helpers. |
+| R11 `function-size` (sources only) | A function with more than 150 code lines of its own. Blank and comment-only lines do not count, nor do the bodies of nested functions, which are measured on their own. | A long function does several jobs. |
+| R12 `parameters` (sources only) | A function with more than 7 parameters. `self` counts; `...` does not. | Every caller depends on the order of all of them. Pass a table. |
+| R13 `luajit-limits` (sources only) | A function near one of LuaJIT's hard limits: more than 50 upvalues (limit 60), 200 stack slots (limit 250) or 180 active locals (limit 200, hidden `for` variables included). The main chunk counts too. | Past a limit the file stops compiling, so the mod does not load. Upvalues and stack slots come from the compiled bytecode. Active locals are counted from the source. |
+| R14 `duplicated-code` (sources only) | A run of at least 100 tokens that also occurs elsewhere: in the same file, another file or another configured repo | A fix made in one copy misses the other. |
+| R15 `module-size` (sources only) | A source file with more than 1000 code lines | A long file mixes concerns, and its main chunk heads for the 200-locals limit (R13). |
 
 Suppression: put `-- lint-ok: R<n> <reason>` on the reported line. The reason is required. To
 name several rules, write `R2,R3`. Inside a cdef string, use a C comment: `/* -- lint-ok: R1 reason */`.
+R10-R12 are reported on the function's first line. R13 reports upvalues and stack slots there
+too, but active locals on the line where the count peaks. R14 is reported on the first line of
+the duplicated region, and R15 on the file's first line. An addon must keep that first line to
+its exact `-- HD2-Addon:` declaration, so a large addon is accepted through the baseline instead.
+
+### Structure rules (R10-R15)
+
+`metrics.py` measures every function on its own, closures included. Upvalue and stack-slot
+counts come from the same compile pass as R8 (one `F` line per prototype).
+
+Cognitive complexity follows SonarSource's 2017 definition, adapted to Lua:
+- `if`, `while`, `for` and `repeat` each add 1, plus 1 for every enclosing `if` or loop;
+- `elseif`, `else` and `goto` each add 1; `break` adds nothing;
+- each run of the same boolean operator adds 1, so `a and b and c` adds 1 and
+  `a and b or c` adds 2. A bracket or call argument starts a run of its own and leaves the
+  outer run going: `a or f(b and c) or d` adds 2;
+- a function that calls itself by its local name adds 1, once.
+
+Unlike SonarSource, a closure is not charged to the function around it. It is measured on its
+own, from nesting 0.
+
+The limits are the defaults in `metrics.LIMITS`. To change them, add a `limits` object to
+`lint-repos.json`: `{"cognitive": 15, "function_lines": 150, "parameters": 7, "upvalues": 50,
+"stack_slots": 200, "active_locals": 180, "module_lines": 1000, "clone_tokens": 100}`. Any key
+may be left out; an unknown key stops the lint with exit code 2.
+
+For R10-R15 the baseline stores the measured value: complexity, lines, parameters, the R13
+count (locals, upvalues or stack slots) or duplicated tokens. A known function that gets worse fails `check`
+(`baseline 16, now 17`), and one that improves is reported as "fixed - run update". A file above
+1000 lines may not grow without review.
+
+R14 (duplicated code) works like PMD's CPD. It compares windows of 100 tokens across every
+configured repo and every `--repo` override, whatever `--only` selects, and reports regions in
+the selected repos. A window that matches only overlapping windows of the same file (a long
+periodic table) is not a duplicate. Files kept byte-identical on purpose are left out:
+`bingus_text.lua`, `frame_budget.lua`, `hostile_vm.lua` and `bingus_runtime.lua`. A `vendored`
+list in `lint-repos.json` replaces these names.
 
 How R8 works: `luajit -bl` prints no line numbers. `lint.py` therefore compiles every source
 file (it never runs them) in one workspace LuaJIT process, with `LUA_PATH` set to the LuaJIT
@@ -51,6 +95,10 @@ Options:
 - `--tests` also lints `tests/` (rules R1-R7).
 - `--repo NAME=PATH` lints another checkout against the baseline, e.g.
   `--repo ShallowWaterDiving=publication\resilience-v1\checkouts\ShallowWaterDiving`.
+  Repeat it for each repo of a release. Before the release, `check` must show no NEW line for
+  those repos, or each one must be reviewed and accepted. The baseline follows the published
+  checkouts. After publishing, point `lint-repos.json` at the new release checkouts and run
+  `update`; accepted increases, such as a file that grew, need `--allow-increase`.
 - `--only NAME` limits the scan, the check and the update to these repos.
 - `--config`, `--baseline` and `--luajit` choose other files.
 
@@ -132,7 +180,14 @@ python -m unittest discover -s tests -v
 
 - `test_lint.py` covers every rule, the `lint-ok` comment and the baseline ratchet. In
   `tests/fixtures/sample_mod`, each expected violation is marked `expect: R<n>`, and a scan must
-  report exactly the marked lines.
+  report exactly the marked lines. The `r10_` to `r15_` fixtures put a function exactly at each
+  limit (silent) beside one just over it (reported). The tests also check that a known function
+  getting worse fails `check` and getting better reads "fixed", that limits come from the config,
+  and that vendored copies are not duplicates.
+- `test_metrics.py` checks cognitive complexity against SonarSource's examples (`sum_of_primes`
+  scores 7), boolean runs, nesting, recursion and closures. It also checks LuaJIT's local count,
+  hidden `for` variables included, and duplicated-code regions. Eight deliberate bugs in
+  `metrics.py` and `lint.py` are all caught.
 - `test_runtime.py` runs `tests/test_runtime.lua` (113 checks) in both VMs: clashing Windows
   prototypes declared first, two runtime copies, C-type growth and allocation per call and per
   frame, write checks against read-only, executable, image and split regions, the session hash

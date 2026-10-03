@@ -157,7 +157,58 @@ class BaselineTests(unittest.TestCase):
         self.assertFalse(self.baseline.exists())
         code, out = self.lint('update', '--allow-increase')
         self.assertEqual(code, 0, out)
-        self.assertEqual(sum(e['count'] for e in self.entries()), len(marked(False)))
+        entries = self.entries()
+        self.assertEqual(len(entries), len(marked(False)), 'one identity per marked line')
+        counted = [e for e in entries if e['rule'] not in lint.STRUCTURE_RULES]
+        self.assertEqual(sum(e['count'] for e in counted), len([m for m in marked(False)
+                                                               if m[0] not in lint.STRUCTURE_RULES]))
+        def measured(rule, file):
+            return sum(e['count'] for e in entries if (e['rule'], e['file']) == (rule, file))
+        self.assertEqual(measured('R12', 'src/r12_parameters.lua'), 8 + 8, 'two functions with 8 each')
+        self.assertEqual(measured('R15', 'src/r15_module_size.lua'), 1001)
+        self.assertEqual(measured('R10', 'src/r10_cognitive.lua'), 16 + 16)
+
+    def test_a_function_getting_worse_fails_check(self):
+        # The baseline holds measured values for R10-R15, so a known violation may not grow.
+        self.lint('update', '--allow-increase')
+        self.edit('src/r10_cognitive.lua', "    repeat d = nil until a and b or c -- one more",
+                  "    if d then d = 0 end\n    repeat d = nil until a and b or c -- one more")
+        code, out = self.lint('check')
+        self.assertEqual(code, 1, out)
+        self.assertIn('NEW R10 cognitive-complexity  SampleMod src/r10_cognitive.lua', out)
+        self.assertIn('(baseline 16, now 17)', out)
+        self.assertIn('cognitive complexity 17 (limit 15)', out)
+
+    def test_a_function_getting_better_is_reported_fixed(self):
+        self.lint('update', '--allow-increase')
+        self.edit('src/r10_cognitive.lua', "    repeat d = nil until a and b or c -- one more",
+                  "    repeat d = nil until a -- one more")
+        code, out = self.lint('check')
+        self.assertEqual(code, 0, out)
+        self.assertIn('fixed - run update: R10 cognitive-complexity  SampleMod src/r10_cognitive.lua', out)
+
+    def test_limits_come_from_the_config(self):
+        config = json.loads(self.config.read_text(encoding='utf-8'))
+        config['limits'] = {'cognitive': 16, 'parameters': 8}
+        self.config.write_text(json.dumps(config), encoding='utf-8')
+        code, out = self.lint('scan', '--list')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('M.sixteen', out)
+        self.assertNotIn('R12 parameters', out)
+        self.assertIn('R11 function-size', out, 'other limits keep their defaults')
+        config['limits'] = {'cognitive': 16, 'speed': 1}
+        self.config.write_text(json.dumps(config), encoding='utf-8')
+        code, out = self.lint('scan')
+        self.assertEqual(code, 2, out)
+        self.assertIn('unknown limits', out)
+
+    def test_vendored_copies_are_not_duplicates(self):
+        # A file kept byte-identical to a canonical copy on purpose is left out of R14.
+        source = self.repo / 'src' / 'r14_shared_b.lua'
+        source.rename(self.repo / 'src' / 'bingus_text.lua')
+        code, out = self.lint('scan', '--list')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('R14 duplicated-code', out)
 
     def test_check_passes_against_its_own_baseline(self):
         self.lint('update', '--allow-increase')
@@ -222,7 +273,8 @@ class BaselineTests(unittest.TestCase):
         self.write_config([('SampleMod', self.repo), ('OtherMod', other)])
         self.lint('update', '--allow-increase')
         self.edit('src/r6_clock.lua', 'return M\n', 'M.started = os.clock()\nreturn M\n', root=other)
-        self.assertEqual(self.lint('check', '--only', 'SampleMod')[0], 0)
+        self.assertEqual(self.lint('check', '--only', 'SampleMod')[0], 0,
+                         'duplicated code is found across every configured repo, whatever --only selects')
         self.assertEqual(self.lint('check')[0], 1)
         code, out = self.lint('scan', '--only', 'SampleMod')
         self.assertNotIn('OtherMod', out)

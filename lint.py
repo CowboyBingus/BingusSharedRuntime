@@ -15,8 +15,13 @@ Common options:
   --config, --baseline, --luajit   alternative files
 
 Rules (see README.md): R1 global-cdef-function, R2 type-string, R3 raw-store, R4 gc-mutation,
-R5 jit-global, R6 os-clock, R7 loader-version, R8 global-write, R9 catch-previous.
-A source line containing `-- lint-ok: R<n> <reason>` suppresses rule R<n> on that line.
+R5 jit-global, R6 os-clock, R7 loader-version, R8 global-write, R9 catch-previous; structure
+(sources only, measured by metrics.py): R10 cognitive-complexity, R11 function-size,
+R12 parameters, R13 luajit-limits, R14 duplicated-code, R15 module-size.
+A source line containing `-- lint-ok: R<n> <reason>` suppresses rule R<n> on that line; for a
+structure rule, put it on the function's first line (R15: the file's first line).
+For R10-R15 the baseline holds the measured value (complexity, lines, parameters, the limit
+counter, duplicated tokens), so a function that gets worse fails `check` too.
 
 Exit codes: 0 fine, 1 new violations (check) or refused update, 2 configuration or compile error.
 """
@@ -33,6 +38,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import metrics
+
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / 'lint-repos.json'
 DEFAULT_BASELINE = HERE / 'lint-baseline.json'
@@ -47,7 +54,16 @@ RULES = {
     'R7': 'loader-version',
     'R8': 'global-write',
     'R9': 'catch-previous',
+    'R10': 'cognitive-complexity',
+    'R11': 'function-size',
+    'R12': 'parameters',
+    'R13': 'luajit-limits',
+    'R14': 'duplicated-code',
+    'R15': 'module-size',
 }
+STRUCTURE_RULES = frozenset(('R10', 'R11', 'R12', 'R13', 'R14', 'R15'))
+# Files kept byte-identical to a canonical copy on purpose (sync tools check them): R14 skips them.
+DEFAULT_VENDORED = ('bingus_text.lua', 'frame_budget.lua', 'hostile_vm.lua', 'bingus_runtime.lua')
 TEST_RULES = frozenset(('R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7'))
 DEFAULT_ALLOWED_GLOBALS = ('update', 'shutdown', 'render')
 DEFAULT_SOURCES = ('src/**/*.lua',)
@@ -768,10 +784,14 @@ def rule_catch_previous(source: Source) -> list[Finding]:
 
 GSET_LISTER = r"""
 -- Reads file paths from stdin, compiles each (no execution) and prints one line per GSET:
--- path TAB line TAB name TAB instruction (as jit.bc, the -bl lister, prints it).
+-- path TAB line TAB name TAB instruction (as jit.bc, the -bl lister, prints it); and one line
+-- per function: F TAB path TAB first line TAB last line TAB params TAB upvalues TAB stack slots.
 local bc, util, vmdef = require('jit.bc'), require('jit.util'), require('jit.vmdef')
 local funcbc, funck, funcinfo = util.funcbc, util.funck, util.funcinfo
 local function walk(fn, path)
+  local info = funcinfo(fn)
+  io.write('F\t', path, '\t', info.linedefined, '\t', info.lastlinedefined, '\t', info.params, '\t',
+           info.upvalues, '\t', info.stackslots, '\n')
   for n = -1, -1000000000, -1 do
     local k = funck(fn, n)
     if k == nil then break end
@@ -795,11 +815,29 @@ end
 """
 
 
+@dataclass(frozen=True)
+class Compiled:
+    """LuaJIT's own numbers for one function (line 0 is the main chunk)."""
+    line: int
+    last: int
+    params: int
+    upvalues: int
+    slots: int
+
+
 def global_writes(luajit: Path, files: list[Path]) -> dict[str, list[tuple[int, str]]]:
     """Compiles files with the workspace LuaJIT and returns {path: [(line, global name)]} for GSETs."""
+    return bytecode_facts(luajit, files)[0]
+
+
+def bytecode_facts(luajit: Path, files: list[Path]) -> tuple[dict[str, list[tuple[int, str]]],
+                                                             dict[str, list[Compiled]]]:
+    """Compiles files once with the workspace LuaJIT: ({path: [(line, global)]} for GSETs,
+    {path: [Compiled per function]})."""
     result: dict[str, list[tuple[int, str]]] = {str(path): [] for path in files}
+    compiled: dict[str, list[Compiled]] = {str(path): [] for path in files}
     if not files:
-        return result
+        return result, compiled
     if not luajit.is_file():
         raise LintError(f'LuaJIT not found: {luajit} (needed for R8; set "luajit" in the config or --luajit)')
     env = dict(os.environ, LUA_PATH=str(luajit.parent / '?.lua') + ';;')
@@ -815,11 +853,13 @@ def global_writes(luajit: Path, files: list[Path]) -> dict[str, list[tuple[int, 
         parts = row.split('\t')
         if parts[0] == '!':
             errors.append(f'{parts[1]}: {parts[2] if len(parts) > 2 else "compile error"}')
+        elif parts[0] == 'F' and len(parts) == 7 and parts[1] in compiled:
+            compiled[parts[1]].append(Compiled(*map(int, parts[2:])))
         elif len(parts) >= 3 and parts[0] in result:
             result[parts[0]].append((int(parts[1]), parts[2]))
     if errors:
         raise LintError('cannot compile:\n  ' + '\n  '.join(errors))
-    return result
+    return result, compiled
 
 
 # ----------------------------------------------------------------------------- scanning
@@ -845,13 +885,15 @@ class Violation:
     text: str
     detail: str
     kind: str  # source or test
+    weight: int = 1  # R10-R15: the measured value, so the ratchet also catches a function getting worse
 
     def key(self) -> tuple[str, str, str, str, str]:
         return (self.repo, self.kind, self.file, self.rule, normalise(self.text))
 
     def as_json(self) -> dict:
         return {'repo': self.repo, 'rule': self.rule, 'name': RULES[self.rule], 'file': self.file,
-                'line': self.line, 'text': self.text, 'detail': self.detail, 'kind': self.kind}
+                'line': self.line, 'text': self.text, 'detail': self.detail, 'kind': self.kind,
+                'value': self.weight}
 
 
 @dataclass
@@ -872,10 +914,47 @@ def suppressed_rules(line: str) -> set[str]:
     return set(re.findall(r'R\d+', match.group(1))) if match else set()
 
 
-def scan_text(repo: Repo, rel: str, text: str, kind: str, gsets: list[tuple[int, str]] | None) -> tuple[list[Violation], list[Violation]]:
+def structure_findings(source: Source, compiled: list[Compiled] | None, limits: dict) -> list[tuple]:
+    """R10-R13 and R15 for one source file: (rule, line, detail, measured value)."""
+    main, functions = metrics.analyse(source.tokens)
+    found: list[tuple] = []
+    for function in functions:
+        where = f'{function.name}: '
+        if function.cognitive > limits['cognitive']:
+            found.append(('R10', function.line, f"{where}cognitive complexity {function.cognitive} (limit "
+                          f"{limits['cognitive']}), nesting depth {function.nesting}", function.cognitive))
+        size = len(function.lines)
+        if size > limits['function_lines']:
+            found.append(('R11', function.line, f"{where}{size} code lines (limit {limits['function_lines']})", size))
+        if function.parameters > limits['parameters']:
+            found.append(('R12', function.line, f"{where}{function.parameters} parameters (limit "
+                          f"{limits['parameters']})", function.parameters))
+    for function in [main] + functions:
+        if function.active_locals > limits['active_locals']:
+            found.append(('R13', function.active_line, f"{function.name}: {function.active_locals} locals in "
+                          f"scope at once (LuaJIT limit 200, warning above {limits['active_locals']})",
+                          function.active_locals))
+    for fact in compiled or []:
+        line = max(fact.line, 1)
+        if fact.upvalues > limits['upvalues']:
+            found.append(('R13', line, f"{fact.upvalues} upvalues (LuaJIT limit 60, warning above "
+                          f"{limits['upvalues']})", fact.upvalues))
+        if fact.slots > limits['stack_slots']:
+            found.append(('R13', line, f"{fact.slots} stack slots (LuaJIT limit 250, warning above "
+                          f"{limits['stack_slots']})", fact.slots))
+    module_lines = len({token.line for token in source.tokens if token.kind != 'eof'})
+    if module_lines > limits['module_lines']:
+        found.append(('R15', 1, f"{module_lines} code lines in one file (limit {limits['module_lines']})",
+                      module_lines))
+    return found
+
+
+def scan_text(repo: Repo, rel: str, text: str, kind: str, gsets: list[tuple[int, str]] | None,
+              compiled: list[Compiled] | None = None, limits: dict | None = None,
+              source: Source | None = None) -> tuple[list[Violation], list[Violation]]:
     """Runs every rule on one file; returns (violations, suppressed), one per rule and line."""
     try:
-        source = Source(text)
+        source = source or Source(text)
     except LintError as problem:
         raise LintError(f'{repo.name}/{rel}: {problem}') from None
     calls = ffi_calls(source)
@@ -893,17 +972,26 @@ def scan_text(repo: Repo, rel: str, text: str, kind: str, gsets: list[tuple[int,
         findings += [('R8', line, f"global '{name}' written into the shared Lua state")
                      for line, name in writes if name not in allowed]
         findings += rule_catch_previous(source)
+        findings += structure_findings(source, compiled, limits or metrics.LIMITS)
     else:
         findings = [f for f in findings if f[0] in TEST_RULES]
-    merged: dict[tuple[str, int], list[str]] = {}
-    for rule, line, detail in findings:
-        details = merged.setdefault((rule, line), [])
+    return _violations(repo, rel, kind, source.lines, findings)
+
+
+def _violations(repo: Repo, rel: str, kind: str, lines: list[str], findings: list[tuple]) -> tuple[list[Violation], list[Violation]]:
+    """One violation per rule and line (details joined, values added); suppressed by lint-ok."""
+    merged: dict[tuple[str, int], tuple[list[str], int]] = {}
+    for finding in findings:
+        rule, line, detail = finding[:3]
+        weight = finding[3] if len(finding) > 3 else 1
+        details, total = merged.get((rule, line), ([], 0))
         if detail not in details:
             details.append(detail)
+        merged[(rule, line)] = (details, total + weight if rule in STRUCTURE_RULES else 1)
     kept, dropped = [], []
-    for (rule, line), details in sorted(merged.items(), key=lambda item: (item[0][1], item[0][0])):
-        line_text = source.lines[line - 1] if 0 < line <= len(source.lines) else ''
-        violation = Violation(repo.name, rule, rel, line, line_text.strip(), '; '.join(details), kind)
+    for (rule, line), (details, weight) in sorted(merged.items(), key=lambda item: (item[0][1], item[0][0])):
+        line_text = lines[line - 1] if 0 < line <= len(lines) else ''
+        violation = Violation(repo.name, rule, rel, line, line_text.strip(), '; '.join(details), kind, weight)
         (dropped if rule in suppressed_rules(line_text) else kept).append(violation)
     return kept, dropped
 
@@ -921,26 +1009,91 @@ def repo_files(repo: Repo, include_tests: bool) -> tuple[list[Path], list[Path]]
     return sorted(sources), (sorted(tests) if include_tests else [])
 
 
-def scan(repos: list[Repo], luajit: Path, include_tests: bool) -> Scan:
+def scan(repos: list[Repo], luajit: Path, include_tests: bool, limits: dict | None = None,
+         vendored: tuple[str, ...] = DEFAULT_VENDORED, corpus: list[Repo] | None = None) -> Scan:
+    """Scans repos. R14 compares their sources with every repo in corpus (default: repos), so a
+    repo's duplicated code does not depend on which repos --only selected."""
+    limits = dict(metrics.LIMITS, **(limits or {}))
     result = Scan(repos, include_tests)
     plan = []
     for repo in repos:
         sources, tests = repo_files(repo, include_tests)
         plan += [(repo, path, 'source') for path in sources] + [(repo, path, 'test') for path in tests]
-    gsets = global_writes(luajit, [path for _, path, kind in plan if kind == 'source'])
+    gsets, compiled = bytecode_facts(luajit, [path for _, path, kind in plan if kind == 'source'])
+    parsed = []
     for repo, path, kind in plan:
         text = path.read_text(encoding='utf-8-sig', errors='replace')
         rel = path.relative_to(repo.path).as_posix()
-        kept, dropped = scan_text(repo, rel, text, kind, gsets.get(str(path)) if kind == 'source' else None)
+        try:
+            source = Source(text)
+        except LintError as problem:
+            raise LintError(f'{repo.name}/{rel}: {problem}') from None
+        is_source = kind == 'source'
+        kept, dropped = scan_text(repo, rel, text, kind, gsets.get(str(path)) if is_source else None,
+                                  compiled.get(str(path)) if is_source else None, limits, source)
         result.violations += kept
         result.suppressed += dropped
         result.files += 1
+        if is_source and path.name not in vendored:
+            parsed.append((repo, rel, source))
+    selected = {repo.name for repo in repos}
+    for repo in corpus or []:
+        if repo.name in selected:
+            continue
+        for path in repo_files(repo, False)[0]:
+            if path.name not in vendored:
+                text = path.read_text(encoding='utf-8-sig', errors='replace')
+                parsed.append((repo, path.relative_to(repo.path).as_posix(), Source(text)))
+    kept, dropped = duplicated_code(parsed, limits['clone_tokens'], selected)
+    result.violations += kept
+    result.suppressed += dropped
     return result
+
+
+def duplicated_code(parsed: list[tuple[Repo, str, Source]], length: int,
+                    report: set[str]) -> tuple[list[Violation], list[Violation]]:
+    """R14: regions of at least `length` tokens that occur again in any parsed source; reported
+    for the repos named in report."""
+    files = [[t for t in source.tokens if t.kind != 'eof'] for _, _, source in parsed]
+    findings: dict[int, list[tuple]] = {}
+    for clone in metrics.duplicates(files, length):
+        repo, rel, source = parsed[clone.file]
+        if repo.name not in report:
+            continue
+        other_repo, other_rel, _ = parsed[clone.other_file]
+        other_line = files[clone.other_file][clone.other_start].line
+        where = other_rel if (other_repo.name, other_rel) == (repo.name, rel) else f'{other_repo.name} {other_rel}'
+        tokens = clone.end - clone.start
+        findings.setdefault(clone.file, []).append((
+            'R14', files[clone.file][clone.start].line,
+            f'{tokens} tokens also at {where}:{other_line}; share one copy (a module or bingus_runtime.lua)',
+            tokens))
+    kept, dropped = [], []
+    for index, found in findings.items():
+        repo, rel, source = parsed[index]
+        k, d = _violations(repo, rel, 'source', source.lines, found)
+        kept += k
+        dropped += d
+    return kept, dropped
 
 
 # ----------------------------------------------------------------------------- configuration
 
-def load_config(path: Path, overrides: list[str], only: list[str], luajit: Path | None) -> tuple[list[Repo], Path]:
+def load_settings(path: Path) -> tuple[dict, tuple[str, ...]]:
+    """Structure limits (metrics.LIMITS overridden by the config's "limits") and vendored file names."""
+    try:
+        config = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as problem:
+        raise LintError(f'cannot read config {path}: {problem}') from None
+    unknown = set(config.get('limits', {})) - set(metrics.LIMITS)
+    if unknown:
+        raise LintError(f'unknown limits in {path.name}: {", ".join(sorted(unknown))}')
+    return dict(metrics.LIMITS, **config.get('limits', {})), tuple(config.get('vendored', DEFAULT_VENDORED))
+
+
+def load_config(path: Path, overrides: list[str], only: list[str], luajit: Path | None,
+                corpus: list[Repo] | None = None) -> tuple[list[Repo], Path]:
+    """Selected repos and LuaJIT; when corpus is a list, it receives every configured repo."""
     try:
         config = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError) as problem:
@@ -964,6 +1117,8 @@ def load_config(path: Path, overrides: list[str], only: list[str], luajit: Path 
             print(f'note: {name} is not in {path.name}; scanning it with the default globs and globals', file=sys.stderr)
             repos[name] = Repo(name, Path(folder).resolve(), list(default_sources), list(default_tests), frozenset())
     selected = list(repos.values())
+    if corpus is not None:
+        corpus.extend(selected)
     if only:
         wanted = {name for item in only for name in item.split(',') if name}
         unknown = wanted - set(repos)
@@ -980,9 +1135,10 @@ Key = tuple[str, str, str, str, str]  # repo, kind, file, rule, normalised line 
 
 
 def counts(violations: list[Violation]) -> dict[Key, int]:
+    """Per identity: the number of violations (R1-R9) or the measured values added up (R10-R15)."""
     result: dict[Key, int] = {}
     for violation in violations:
-        result[violation.key()] = result.get(violation.key(), 0) + 1
+        result[violation.key()] = result.get(violation.key(), 0) + violation.weight
     return result
 
 
@@ -1093,9 +1249,9 @@ def command_check(result: Scan, args) -> int:
     increases, decreases = compare(baseline, current, result)
     print_identities('NEW', increases, result)
     print_identities('fixed - run update:', decreases, result)
-    known = sum(min(n, baseline.get(key, 0)) for key, n in current.items())
-    print(f'lint check: {sum(n - o for _, o, n in increases)} new, {sum(o - n for _, o, n in decreases)} fixed, '
-          f'{known} known violation(s) in {len(result.repos)} repo(s); baseline {args.baseline.name}')
+    known = sum(1 for key, n in current.items() if 0 < n <= baseline.get(key, 0))
+    print(f'lint check: {len(increases)} new, {len(decreases)} fixed, {known} known identities in '
+          f'{len(result.repos)} repo(s); baseline {args.baseline.name}')
     return 1 if increases else 0
 
 
@@ -1115,8 +1271,8 @@ def command_update(result: Scan, args) -> int:
     entries = {key: n for key, n in baseline.items() if not in_scope(key, result)}
     entries.update(current)
     write_baseline(args.baseline, entries)
-    print(f'baseline updated: {sum(1 for n in entries.values() if n > 0)} identities, {sum(entries.values())} violation(s); '
-          f'{sum(o - n for _, o, n in decreases)} fewer, {sum(n - o for _, o, n in increases)} more than before')
+    print(f'baseline updated: {sum(1 for n in entries.values() if n > 0)} identities ({len(result.violations)} '
+          f'violation(s) in this scan); {len(decreases)} lower or gone, {len(increases)} higher or new than before')
     return 0
 
 
@@ -1137,8 +1293,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--luajit', type=Path)
     args = parser.parse_args(argv)
     try:
-        repos, luajit = load_config(args.config, args.repo, args.only, args.luajit)
-        result = scan(repos, luajit, args.tests)
+        corpus: list[Repo] = []
+        repos, luajit = load_config(args.config, args.repo, args.only, args.luajit, corpus)
+        limits, vendored = load_settings(args.config)
+        result = scan(repos, luajit, args.tests, limits, vendored, corpus)
         return {'scan': command_scan, 'check': command_check, 'update': command_update}[args.command](result, args)
     except LintError as problem:
         print(f'lint.py: {problem}', file=sys.stderr)
