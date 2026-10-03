@@ -1,8 +1,9 @@
-# Resilience tooling (layer 2)
+# Resilience tooling (layers 1 and 2)
 
 Workspace tools that keep the mod family safe in the one LuaJIT 2.1.0-alpha state
 (`bin/lua51.dll`, non-GC64) that the game shares with every mod. They use only the
-Python standard library and the workspace LuaJIT. Nothing here ships in a mod.
+Python standard library and the workspace LuaJIT. Only `runtime/bingus_runtime.lua`
+ships in mods, as a byte-identical vendored copy.
 
 | File | Purpose |
 | --- | --- |
@@ -10,6 +11,7 @@ Python standard library and the workspace LuaJIT. Nothing here ships in a mod.
 | `lint-repos.json` | Repos to scan: the latest published checkouts (read only), their globs and allowed globals |
 | `lint-baseline.json` | Known violations: count per (repo, kind, file, rule, line text) |
 | `hostile_vm.lua` | Canonical test helper; copy it byte-identical to a mod's `tests/hostile_vm.lua` |
+| `runtime/bingus_runtime.lua` | Canonical shared runtime (layer 1); copy it byte-identical into a mod's `src/` |
 | `tests/` | `unittest` for `lint.py`; a Lua test for `hostile_vm.lua` that runs in both VMs |
 
 ## Lint rules
@@ -87,6 +89,41 @@ env.update(1 / 60)                             -- warm-up frame
 assert(H.ctype_growth(env.update, 1 / 60) == 0, 'C types created per frame')
 ```
 
+## runtime/bingus_runtime.lua
+
+Version 1 of the pieces every mod used to hand-roll. A mod vendors a byte-identical copy, runs it
+once when it loads (the chunk returns the `runtime` table and installs nothing), and adopts it at
+its next release. Copies of different versions coexist: FFI names carry the version
+(`bingus_rt1_...`) and the session caches live in one global table, `BingusRuntime`
+(`hashes`, `statuses`, `versions`, `hash_reads`).
+
+- `runtime.memory()` returns the memory API:
+  - `read(address, size)` (string or nil; allocates only the string), `read_into(address, size,
+    buffer)` (no allocation), `pointer(bytes, offset)`, `address(pointer)`, `distance(a, b)`;
+  - `write(address, bytes [, size])` and `write_batch(base, size, {{offset, bytes}, ...})`: only
+    into committed private read-write memory, checked with one VirtualQuery per region right
+    before the write (`api.queries` counts them);
+  - `module(name)`, `module_hash(module)` (SHA-256, read once per session for every mod),
+    `verify_build({exe_sha256, game_sha256})`.
+- `runtime.guard{name, step, after, stop, log, errors, env}.install()` wraps `update` and
+  `shutdown`: the previous update runs outside pcall (P1), the first failure survives shutdown as
+  `stopped after: <reason>` (P2), a failing step or after stops after 8 errors with one log line
+  (P3), every argument and return passes through, and `status` lands in
+  `BingusRuntime.statuses[name]`. `guard.stop(reason)` stops it from the mod (a refusal counts as
+  the first failure); `stop` work runs once.
+- Per frame: the step under pcall, one boolean test and two stores, one compare; no allocation,
+  closure or system call (tested). A write costs one VirtualQuery per region (about 0.29 ms each in
+  game).
+
+```lua
+local runtime = load_vendored('bingus_runtime')()   -- however the mod's build embeds it
+local api = runtime.memory()
+local ok, why = api.verify_build(build)
+local guard = runtime.guard({name = 'ExampleMod', step = step, stop = restore,
+                             log = function(line) log_line(line) end}).install()
+if not ok then guard.stop(why) end
+```
+
 ## Tests
 
 ```
@@ -96,6 +133,11 @@ python -m unittest discover -s tests -v
 - `test_lint.py` covers every rule, the `lint-ok` comment and the baseline ratchet. In
   `tests/fixtures/sample_mod`, each expected violation is marked `expect: R<n>`, and a scan must
   report exactly the marked lines.
+- `test_runtime.py` runs `tests/test_runtime.lua` (113 checks) in both VMs: clashing Windows
+  prototypes declared first, two runtime copies, C-type growth and allocation per call and per
+  frame, write checks against read-only, executable, image and split regions, the session hash
+  cache, and the guard against hostile neighbours (`throw_below`, `double_call`, `drop_args`,
+  `rehook`). Nine mutations of the runtime are all caught in both VMs.
 - `test_hostile_vm.py` runs `tests/test_hostile_vm.lua` twice: in the workspace LuaJIT, and in the
   installed game's `lua51.dll` through `PerformanceBaseline/game_lua.py`. The game is never
   started.
