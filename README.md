@@ -153,12 +153,24 @@ its next release. Copies of different versions coexist: FFI names carry the vers
     before the write (`api.queries` counts them);
   - `module(name)`, `module_hash(module)` (SHA-256, read once per session for every mod),
     `verify_build({exe_sha256, game_sha256})`.
-- `runtime.guard{name, step, after, stop, log, errors, env}.install()` wraps `update` and
-  `shutdown`: the previous update runs outside pcall (P1), the first failure survives shutdown as
-  `stopped after: <reason>` (P2), a failing step or after stops after 8 errors with one log line
-  (P3), every argument and return passes through, and `status` lands in
-  `BingusRuntime.statuses[name]`. `guard.stop(reason)` stops it from the mod (a refusal counts as
-  the first failure); `stop` work runs once.
+- `runtime.guard{name, step, after, stop, pause, log, errors, resume, clean, env}.install()` wraps
+  `update` and `shutdown`. Each step is listed below.
+  - The previous update runs outside pcall (P1).
+  - The first failure survives shutdown as `stopped after: <reason>` (P2).
+  - Eight errors stop the mod (P3). The mod's own step and after errors are counted apart from
+    updates below it that raised. Each count starts again after `clean` error-free frames
+    (default 3600, about a minute at 60 FPS), so rare transient errors never add up to a stop.
+    Each burst gets one log line.
+  - When an update below raises, a mod that passes `pause(reason)` has its game state restored and
+    is reset to a fresh start. It then skips its step until the updates below have returned on
+    `resume` frames in a row (default 60), and resumes. Without `pause`, that error stops the mod
+    for the session. A `pause` that raises stops it too.
+  - Every argument and return passes through, and `status` lands in
+    `BingusRuntime.statuses[name]` (`state`, `errors`, `lower_errors`, `pauses`).
+  - `guard.stop(reason)` stops it from the mod (a refusal counts as the first failure); `stop`
+    work runs once.
+- `runtime.shared()` repairs a shared table that another copy or mod left incomplete, even
+  `BingusRuntime = {}`, instead of failing in every adopter.
 - Per frame: the step under pcall, one boolean test and two stores, one compare; no allocation,
   closure or system call (tested). A write costs one VirtualQuery per region (about 0.29 ms each in
   game).
@@ -188,7 +200,7 @@ python -m unittest discover -s tests -v
   scores 7), boolean runs, nesting, recursion and closures. It also checks LuaJIT's local count,
   hidden `for` variables included, and duplicated-code regions. Eight deliberate bugs in
   `metrics.py` and `lint.py` are all caught.
-- `test_runtime.py` runs `tests/test_runtime.lua` (113 checks) in both VMs: clashing Windows
+- `test_runtime.py` runs `tests/test_runtime.lua` in both VMs: clashing Windows
   prototypes declared first, two runtime copies, C-type growth and allocation per call and per
   frame, write checks against read-only, executable, image and split regions, the session hash
   cache, and the guard against hostile neighbours (`throw_below`, `double_call`, `drop_args`,

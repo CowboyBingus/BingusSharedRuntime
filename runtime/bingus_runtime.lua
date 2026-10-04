@@ -20,12 +20,14 @@
 --   for every mod that asks.
 -- - guard(): the update and shutdown wrappers. The previous update runs outside
 --   pcall, so its errors reach the game unchanged (P1); the first failure
---   survives shutdown as "stopped after: <reason>" (P2); a failing step stops
---   after 8 errors with one log line (P3); every argument and return value passes
+--   survives shutdown as "stopped after: <reason>" (P2); 8 errors stop the mod,
+--   counted per burst so rare transient errors never add up (P3); a mod that can
+--   restore its state pauses after an error below it and resumes when the
+--   updates below run cleanly again; every argument and return value passes
 --   through; a status table per mod lands in BingusRuntime.statuses.
 --
--- Per-frame cost of a guard: the mod's step under pcall (as before), one boolean
--- test and two boolean stores around the previous update, one integer compare;
+-- Per-frame cost of a guard: the mod's step under pcall (as before), a few
+-- boolean tests and stores and two integer counters around the previous update;
 -- no allocation, closure or system call. A write costs one VirtualQuery per
 -- memory region it touches (about 0.29 ms each in game), so write only on frames
 -- that act. Unmeasured in game.
@@ -38,15 +40,23 @@ local max, format, concat = math.max, string.format, table.concat
 -- Session state shared by every copy of every version ----------------------------
 
 local SHARED = 'BingusRuntime'
+local SHARED_TABLES = {'hashes', 'statuses', 'versions'}
 
+-- Another copy, another version or another mod may have left the table
+-- incomplete (even `BingusRuntime = {}`): missing or broken fields are filled in,
+-- so one stray assignment cannot stop every mod on the runtime.
 function runtime.shared(globals)
     globals = globals or _G
     local shared = rawget(globals, SHARED)
     if type(shared) ~= 'table' then
-        shared = {hashes = {}, statuses = {}, versions = {}, hash_reads = 0}
+        shared = {}
         rawset(globals, SHARED, shared)
     end
-    shared.versions[runtime.VERSION] = true
+    for _, field in ipairs(SHARED_TABLES) do
+        if type(rawget(shared, field)) ~= 'table' then rawset(shared, field, {}) end
+    end
+    if type(rawget(shared, 'hash_reads')) ~= 'number' then rawset(shared, 'hash_reads', 0) end
+    rawset(rawget(shared, 'versions'), runtime.VERSION, true)
     return shared
 end
 
@@ -275,8 +285,16 @@ end
 --   after   function() after the previous update returned, while running
 --   stop    function(reason) once, when the guard stops or the game shuts down;
 --           its errors are kept in status.stop_error, never raised
---   log     function(line) for the guard's few lines (first error, stop)
---   errors  step and after errors that stop the guard (default 8)
+--   pause   function(reason), optional: an update below this mod raised; restore
+--           the game state and reset the mod to a fresh start. With it the guard
+--           pauses (no step, no after) and resumes once the updates below have
+--           returned on `resume` frames in a row (default 60). Without it such an
+--           error stops the guard. A pause that raises stops the guard.
+--   log     function(line) for the guard's few lines (errors, pauses, resumes, stop)
+--   errors  errors that stop the guard (default 8), counted separately for the
+--           mod's own step and after and for the updates below it. A count starts
+--           again after `clean` frames without such an error (default 3600, about a
+--           minute at 60 FPS), so rare transient errors never add up to a stop.
 --   env     the table holding update and shutdown (default _G)
 -- guard.stop(reason) stops it from the mod (a refusal counts as the first failure).
 function runtime.guard(options)
@@ -284,12 +302,15 @@ function runtime.guard(options)
     if type(name) ~= 'string' or name == '' then error('guard name required', 0) end
     local shared = runtime.shared(options.env)
     if shared.statuses[name] and shared.statuses[name].installed then error('guard ' .. name .. ' already installed', 0) end
-    local status = {name = name, version = runtime.VERSION, state = 'new', installed = false, errors = 0}
+    local status = {name = name, version = runtime.VERSION, state = 'new', installed = false, errors = 0,
+        lower_errors = 0, pauses = 0}
     shared.statuses[name] = status
-    local step, after_step, stop_work, log = options.step, options.after, options.stop, options.log
-    local limit = options.errors or 8
+    local step, after_step, stop_work, pause_work, log = options.step, options.after, options.stop, options.pause,
+        options.log
+    local limit, resume_after, clean_after = options.errors or 8, options.resume or 60, options.clean or 3600
     local previous_update, previous_shutdown
-    local in_previous, stopped = false, false
+    local in_previous, stopped, paused, failed = false, false, false, false
+    local clean_run, lower_run = 0, 0
 
     local function note(line)
         if log then pcall(log, line) end
@@ -297,7 +318,7 @@ function runtime.guard(options)
 
     local function halt(reason)
         if stopped then return end
-        stopped = true
+        stopped, paused = true, false
         status.first_failure = status.first_failure or reason
         status.state = 'stopped: ' .. reason
         note(name .. ' stopped: ' .. reason)
@@ -307,33 +328,76 @@ function runtime.guard(options)
         end
     end
 
+    -- The mod's own step or after raised: one log line per burst of errors.
     local function failed_step(problem)
+        failed, clean_run = true, 0
         status.errors = status.errors + 1
+        local text = tostring(problem)
+        status.first_error = status.first_error or text
         if status.errors == 1 then
-            status.first_error = tostring(problem)
-            note(name .. ' error: ' .. status.first_error)
+            status.burst_error = text
+            note(name .. ' error: ' .. text)
         end
-        if status.errors >= limit then halt('stopped after ' .. limit .. ' errors: ' .. status.first_error) end
+        if status.errors >= limit then halt('stopped after ' .. limit .. ' errors: ' .. status.burst_error) end
+    end
+
+    -- An update below this mod raised (seen on the next frame).
+    local function failed_below()
+        lower_run = 0
+        status.lower_errors = status.lower_errors + 1
+        if not pause_work then return halt('the previous update failed') end
+        if status.lower_errors >= limit then
+            return halt('stopped after ' .. limit .. ' failed updates below this mod')
+        end
+        if paused then return end
+        paused = true
+        status.pauses = status.pauses + 1
+        status.state = 'paused: the previous update failed'
+        note(name .. ' paused: the previous update failed')
+        local ok, why = pcall(pause_work, 'the previous update failed')
+        if not ok then halt('pause failed: ' .. tostring(why)) end
+    end
+
+    local function resume_when_clean()
+        if paused and lower_run >= resume_after then
+            paused = false
+            status.state = 'running'
+            note(name .. ' resumed after ' .. resume_after .. ' clean frames')
+        end
+    end
+
+    -- Counts a frame without an own error, which also clears an old burst.
+    local function count_clean()
+        if failed then return end
+        clean_run = clean_run + 1
+        if clean_run == clean_after then status.errors = 0 end
     end
 
     local function finish(...)
         in_previous = false
-        if after_step and not stopped then
-            local ok, problem = pcall(after_step)
-            if not ok then failed_step(problem) end
+        lower_run = lower_run + 1
+        if lower_run == clean_after then status.lower_errors = 0 end
+        if not stopped and not paused then
+            if after_step then
+                local ok, problem = pcall(after_step)
+                if not ok then failed_step(problem) end
+            end
+            count_clean()
         end
         return ...
     end
 
     -- The previous update runs outside pcall: its errors (value and traceback)
     -- reach the game unchanged. One that raised leaves in_previous set, and the
-    -- next frame stops this mod once and keeps forwarding.
+    -- next frame pauses (or stops) this mod and keeps forwarding.
     local function update(...)
+        failed = false
         if in_previous then
             in_previous = false
-            halt('the previous update failed')
+            if not stopped then failed_below() end
         end
-        if step and not stopped then
+        resume_when_clean()
+        if step and not stopped and not paused then
             local ok, problem = pcall(step, ...)
             if not ok then failed_step(problem) end
         end

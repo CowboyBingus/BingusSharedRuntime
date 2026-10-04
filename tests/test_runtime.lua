@@ -265,4 +265,89 @@ do -- no allocation and no closure per frame
     check('20000 guarded frames allocate nothing', garbage < 16, garbage)
 end
 
+-- 7. A broken shared table ----------------------------------------------------------------------
+
+do -- missing or broken fields are filled in; the table itself is kept
+    local env = {BingusRuntime = {hashes = 'not a table', hash_reads = 'x'}}
+    local shared = runtime.shared(env)
+    check('broken shared table repaired', rawget(env, 'BingusRuntime') == shared and type(shared.hashes) == 'table'
+        and type(shared.statuses) == 'table' and shared.versions[1] == true and shared.hash_reads == 0)
+    local kept = rawget(_G, 'BingusRuntime')
+    rawset(_G, 'BingusRuntime', {})
+    local ok, hash = pcall(function() return runtime.memory().module_hash(exe) end)
+    check('module hashes still work after BingusRuntime = {}', ok and hash == exe_sha256, hash)
+    rawset(_G, 'BingusRuntime', kept)
+end
+
+-- 8. Pause and resume after an error below; bursts --------------------------------------------
+
+do -- with pause: the next frame restores and pauses; clean frames resume the mod
+    local env, steps, pauses, stops, lines = environment(), 0, {}, 0, {}
+    H.chain(env, 'throw_below', {raise_on = 2})
+    local guard = runtime.guard({name = 'pausing', env = env, log = function(line) lines[#lines + 1] = line end,
+        step = function() steps = steps + 1 end, stop = function() stops = stops + 1 end,
+        pause = function(reason) pauses[#pauses + 1] = reason end}).install()
+    env.update(1)
+    check('the error below passes unchanged', not pcall(env.update, 1))
+    env.update(1)
+    check('the next frame pauses once and skips the step', #pauses == 1 and pauses[1] == 'the previous update failed'
+        and steps == 2 and stops == 0 and guard.status.state == 'paused: the previous update failed')
+    for _ = 1, 59 do env.update(1) end
+    check('paused until 60 updates below have returned', steps == 2 and guard.status.state:find('^paused'))
+    env.update(1)
+    check('then resumed, stepping again', steps == 3 and guard.status.state == 'running' and guard.running())
+    check('one line each for the pause and the resume', #lines == 2 and lines[1]:find('paused', 1, true)
+        and lines[2]:find('resumed', 1, true), #lines)
+    env.shutdown()
+    check('a resumed mod ends a clean session', guard.status.state == 'stopped' and stops == 1)
+    H.chain_restore(env)
+end
+
+do -- errors below that keep coming stop the mod after 8; pause work runs once
+    local env, pauses, stops = environment(), 0, 0
+    H.chain(env, 'throw_below', {raise_on = function(frame) return frame % 2 == 0 end})
+    local guard = runtime.guard({name = 'failing-below', env = env, step = function() end,
+        stop = function() stops = stops + 1 end, pause = function() pauses = pauses + 1 end}).install()
+    for _ = 1, 40 do pcall(env.update, 1) end
+    check('8 failed updates below stop the mod', guard.status.state == 'stopped: stopped after 8 failed updates below this mod'
+        and guard.status.lower_errors == 8 and pauses == 1 and stops == 1, guard.status.state)
+    H.chain_restore(env)
+end
+
+do -- a pause that raises stops the mod
+    local env = environment()
+    H.chain(env, 'throw_below', {raise_on = 1})
+    local guard = runtime.guard({name = 'bad-pause', env = env, pause = function() error('restore failed') end}).install()
+    pcall(env.update, 1)
+    env.update(1)
+    check('a failed pause stops', guard.status.state:find('^stopped: pause failed: .*restore failed'), guard.status.state)
+    H.chain_restore(env)
+end
+
+do -- own errors separated by a clean minute never stop the mod; 8 in a burst do
+    local env, failing, lines = environment(), true, {}
+    local guard = runtime.guard({name = 'bursts', env = env, log = function(line) lines[#lines + 1] = line end,
+        step = function() if failing then error('transient') end end}).install()
+    for _ = 1, 7 do env.update(1) end
+    failing = false
+    for _ = 1, 3600 do env.update(1) end
+    check('a clean minute clears the burst', guard.status.errors == 0 and guard.running())
+    failing = true
+    for _ = 1, 7 do env.update(1) end
+    check('a second burst of 7 keeps running', guard.running() and guard.status.errors == 7)
+    env.update(1)
+    check('the 8th error of a burst stops', not guard.running() and guard.status.state:find('stopped after 8 errors'))
+    check('one error line per burst plus the stop', #lines == 3, #lines)
+end
+
+do -- errors below separated by a clean minute never stop the mod
+    local env, frame = environment(), 0
+    H.chain(env, 'throw_below', {raise_on = function(n) return n % 3700 == 0 end})
+    local guard = runtime.guard({name = 'rare-below', env = env, step = function() end, pause = function() end}).install()
+    for _ = 1, 3700 * 10 + 1 do frame = frame + 1; pcall(env.update, 1) end   -- +1: the frame that sees the 10th
+    check('ten rare errors below over ten minutes: still running', guard.status.pauses == 10 and guard.running()
+        and guard.status.lower_errors <= 1, guard.status.state)
+    H.chain_restore(env)
+end
+
 print('bingus_runtime: ' .. passed .. ' checks passed (' .. jit.version .. ')')
