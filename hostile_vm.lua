@@ -1,6 +1,6 @@
 -- hostile_vm.lua: the game's shared Lua state, made hostile, for mod tests.
--- Canonical copy: Resilience/hostile_vm.lua; each mod repo carries a
--- byte-identical tests/hostile_vm.lua (like PerformanceBaseline/frame_budget.lua).
+-- Canonical copy: github.com/CowboyBingus/BingusSharedRuntime, hostile_vm.lua.
+-- A mod repo keeps a byte-identical copy as tests/hostile_vm.lua.
 --
 -- In Helldivers 2 the game and every mod share ONE LuaJIT 2.1.0-alpha state
 -- (bin/lua51.dll, non-GC64): one set of C declarations, one C type table, one
@@ -8,8 +8,8 @@
 -- nobody else declared a C function, the type table is nearly empty, the test
 -- owns update, and the GC and JIT keep their defaults. These helpers bring
 -- back what other mods do to that state, so that a test fails where the game
--- would misbehave or crash. Pure Lua + FFI, Lua 5.1 syntax: runs in the
--- workspace LuaJIT and in the game's lua51.dll (PerformanceBaseline/game_lua.py).
+-- would misbehave or crash. Pure Lua + FFI, Lua 5.1 syntax: runs in a LuaJIT
+-- 2.1 executable and in the game's lua51.dll (game_lua.py, same repository).
 --
 --   local H = dofile(tests .. '/hostile_vm.lua')
 --
@@ -76,8 +76,8 @@
 --
 -- H.jit_churn() -> flush
 --   flush() calls jit.flush() (tests only) and returns how many flushes it made.
---   A full code cache (512 KB / 1000 traces shared by every mod without loader
---   v18) or a neighbour discards every compiled trace the same way. Call it
+--   A full code cache (by default 512 KB and 1000 traces for the game and every
+--   mod) or a neighbour discards every compiled trace the same way. Call it
 --   between frames: a mod must behave the same interpreted, freshly compiled
 --   and after any flush (e.g. FFI type punning that goes stale under the JIT).
 --
