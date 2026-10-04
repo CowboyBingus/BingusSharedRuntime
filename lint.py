@@ -67,7 +67,8 @@ RULES = {
 }
 STRUCTURE_RULES = frozenset(('R10', 'R11', 'R12', 'R13', 'R14', 'R15'))
 # Files kept byte-identical to a canonical copy on purpose (sync tools check them): R14 skips them.
-DEFAULT_VENDORED = ('bingus_text.lua', 'frame_budget.lua', 'hostile_vm.lua', 'bingus_runtime.lua')
+DEFAULT_VENDORED = ('bingus_text.lua', 'frame_budget.lua', 'hostile_vm.lua', 'bingus_runtime.lua',
+                    'bingus_memory.lua', 'bingus_write.lua')
 TEST_RULES = frozenset(('R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7'))
 DEFAULT_ALLOWED_GLOBALS = ('update', 'shutdown', 'render')
 DEFAULT_SOURCES = ('src/**/*.lua',)
@@ -1129,7 +1130,7 @@ def duplicated_code(parsed: list[tuple[Repo, str, Source]], length: int,
         tokens = clone.end - clone.start
         findings.setdefault(clone.file, []).append((
             'R14', files[clone.file][clone.start].line,
-            f'{tokens} tokens also at {where}:{other_line}; share one copy (a module or bingus_runtime.lua)',
+            f'{tokens} tokens also at {where}:{other_line}; share one copy (a module, or a Bingus Shared Runtime file)',
             tokens))
     kept, dropped = [], []
     for index, found in findings.items():
