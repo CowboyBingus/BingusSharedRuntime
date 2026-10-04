@@ -429,3 +429,7 @@ Each runtime test was checked against deliberate bugs: 40 mutations of the three
 caught in both VMs.
 
 **AI disclosure:** Claude Opus 5.5 assisted with research, implementation, tests and documentation.
+
+## License
+
+Zero-Clause BSD (0BSD): use, copy, modify and distribute for any purpose, with no conditions. See `LICENSE`.

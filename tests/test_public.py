@@ -37,9 +37,11 @@ class PublicRepository(unittest.TestCase):
         self.assertTrue(readme.startswith('# Bingus Shared Runtime\n'))
         self.assertEqual(readme.count(DISCLOSURE), 1)
 
-    def test_no_license_file(self):
-        # Licensing is the owner's decision; nothing here adds one.
-        self.assertEqual([p.name for p in support.ROOT.glob('LICENSE*')], [])
+    def test_license_is_zero_clause_bsd(self):
+        # 0BSD: use, copy, modify and distribute for any purpose, no conditions.
+        text = (support.ROOT / 'LICENSE').read_text(encoding='utf-8')
+        self.assertIn('Zero-Clause BSD', text)
+        self.assertIn('Copyright (C) 2026 by CowboyBingus', text)
 
 
 if __name__ == '__main__':
