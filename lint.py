@@ -1,4 +1,4 @@
-"""Resilience lint for the Bingus Helldivers 2 Lua mods (Python standard library only).
+"""Bingus Shared Runtime lint for Helldivers 2 Lua mods (Python standard library only).
 
 Every mod shares one LuaJIT 2.1.0-alpha state with the game and with other mods.
 This lint finds code that is unsafe in that shared state and keeps a baseline of
@@ -12,7 +12,9 @@ Common options:
   --tests             also scan test files (rules R1-R7 only)
   --repo NAME=PATH    lint another checkout of NAME (e.g. a working branch) against the baseline
   --only NAME         limit the scan, the check and the update to these repos
-  --config, --baseline, --luajit   alternative files
+  --workspace PATH    folder that relative paths in the config start from (default: the
+                      BINGUS_WORKSPACE environment variable, else the folder holding this repository)
+  --config, --baseline, --luajit   alternative files (LuaJIT also from BINGUS_LUAJIT)
 
 Rules (see README.md): R1 global-cdef-function, R2 type-string, R3 raw-store, R4 gc-mutation,
 R5 jit-global, R6 os-clock, R7 loader-version, R8 global-write, R9 catch-previous; structure
@@ -43,6 +45,8 @@ import metrics
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / 'lint-repos.json'
 DEFAULT_BASELINE = HERE / 'lint-baseline.json'
+WORKSPACE_VARIABLE = 'BINGUS_WORKSPACE'
+LUAJIT_VARIABLE = 'BINGUS_LUAJIT'
 
 RULES = {
     'R1': 'global-cdef-function',
@@ -884,20 +888,21 @@ class Compiled:
 
 
 def global_writes(luajit: Path, files: list[Path]) -> dict[str, list[tuple[int, str]]]:
-    """Compiles files with the workspace LuaJIT and returns {path: [(line, global name)]} for GSETs."""
+    """Compiles files with LuaJIT and returns {path: [(line, global name)]} for GSETs."""
     return bytecode_facts(luajit, files)[0]
 
 
 def bytecode_facts(luajit: Path, files: list[Path]) -> tuple[dict[str, list[tuple[int, str]]],
                                                              dict[str, list[Compiled]]]:
-    """Compiles files once with the workspace LuaJIT: ({path: [(line, global)]} for GSETs,
+    """Compiles files once with LuaJIT: ({path: [(line, global)]} for GSETs,
     {path: [Compiled per function]})."""
     result: dict[str, list[tuple[int, str]]] = {str(path): [] for path in files}
     compiled: dict[str, list[Compiled]] = {str(path): [] for path in files}
     if not files:
         return result, compiled
     if not luajit.is_file():
-        raise LintError(f'LuaJIT not found: {luajit} (needed for R8; set "luajit" in the config or --luajit)')
+        raise LintError(f'LuaJIT not found: {luajit} (needed for R8; set "luajit" in the config, '
+                        f'{LUAJIT_VARIABLE} or --luajit)')
     env = dict(os.environ, LUA_PATH=str(luajit.parent / '?.lua') + ';;')
     with tempfile.TemporaryDirectory() as folder:
         script = Path(folder) / 'gset_lister.lua'
@@ -1149,14 +1154,44 @@ def load_settings(path: Path) -> tuple[dict, tuple[str, ...]]:
     return dict(metrics.LIMITS, **config.get('limits', {})), tuple(config.get('vendored', DEFAULT_VENDORED))
 
 
+def workspace_root(option: Path | None = None) -> Path:
+    """The folder relative config paths start from: the --workspace option, else the
+    BINGUS_WORKSPACE environment variable, else the folder that holds this repository."""
+    if option:
+        return Path(option).resolve()
+    variable = os.environ.get(WORKSPACE_VARIABLE)
+    return Path(variable).resolve() if variable else HERE.parent
+
+
+def configured_luajit(config: dict, workspace: Path, option: Path | None = None) -> Path:
+    """The LuaJIT executable: the --luajit option, else BINGUS_LUAJIT, else the config's
+    "luajit" (relative to the workspace)."""
+    if option:
+        return Path(option)
+    variable = os.environ.get(LUAJIT_VARIABLE)
+    if variable:
+        return Path(variable)
+    return (workspace / config.get('luajit', '')).resolve()
+
+
+def default_luajit(config: Path = DEFAULT_CONFIG, workspace: Path | None = None) -> Path:
+    """configured_luajit for a config file; tests use it to find the same LuaJIT as the lint."""
+    try:
+        data = json.loads(Path(config).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        data = {}
+    return configured_luajit(data, workspace_root(workspace))
+
+
 def load_config(path: Path, overrides: list[str], only: list[str], luajit: Path | None,
-                corpus: list[Repo] | None = None) -> tuple[list[Repo], Path]:
-    """Selected repos and LuaJIT; when corpus is a list, it receives every configured repo."""
+                corpus: list[Repo] | None = None, workspace: Path | None = None) -> tuple[list[Repo], Path]:
+    """Selected repos and LuaJIT; when corpus is a list, it receives every configured repo.
+    Relative paths in the config start from the workspace (see workspace_root)."""
     try:
         config = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError) as problem:
         raise LintError(f'cannot read config {path}: {problem}') from None
-    base = path.parent
+    base = workspace_root(workspace)
     default_sources = config.get('default_sources', list(DEFAULT_SOURCES))
     default_tests = config.get('default_tests', list(DEFAULT_TESTS))
     repos: dict[str, Repo] = {}
@@ -1183,8 +1218,7 @@ def load_config(path: Path, overrides: list[str], only: list[str], luajit: Path 
         if unknown:
             raise LintError(f'--only names unknown repos: {", ".join(sorted(unknown))}')
         selected = [repo for repo in selected if repo.name in wanted]
-    exe = luajit or (base / config.get('luajit', '')).resolve()
-    return selected, exe
+    return selected, configured_luajit(config, base, luajit)
 
 
 # ----------------------------------------------------------------------------- baseline
@@ -1348,11 +1382,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--allow-increase', action='store_true', help='update: accept counts that rose')
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--baseline', type=Path, default=DEFAULT_BASELINE)
-    parser.add_argument('--luajit', type=Path)
+    parser.add_argument('--luajit', type=Path, help=f'LuaJIT executable (default: {LUAJIT_VARIABLE}, else the '
+                                                    "config's luajit)")
+    parser.add_argument('--workspace', type=Path, help='folder that relative config paths start from (default: '
+                                                       f'{WORKSPACE_VARIABLE}, else the folder holding this repository)')
     args = parser.parse_args(argv)
     try:
         corpus: list[Repo] = []
-        repos, luajit = load_config(args.config, args.repo, args.only, args.luajit, corpus)
+        repos, luajit = load_config(args.config, args.repo, args.only, args.luajit, corpus, args.workspace)
         limits, vendored = load_settings(args.config)
         result = scan(repos, luajit, args.tests, limits, vendored, corpus)
         return {'scan': command_scan, 'check': command_check, 'update': command_update}[args.command](result, args)

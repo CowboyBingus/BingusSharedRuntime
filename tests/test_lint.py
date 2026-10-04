@@ -1,24 +1,23 @@
 """Tests for lint.py: every rule on fixture files, the lint-ok comment and the baseline ratchet.
 
 Fixture lines carry `expect: R<n>` markers; a scan must report exactly the marked lines.
-Run: python -m unittest discover -s tests -v   (from the Resilience folder)
+Run: python -m unittest discover -s tests -v   (from the repository folder)
 """
 import contextlib
 import io
 import json
 import re
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-import lint  # noqa: E402
+import support
+import lint  # noqa: E402  (support puts the repository on sys.path)
 
+ROOT = support.ROOT
 FIXTURE = ROOT / 'tests' / 'fixtures' / 'sample_mod'
-LUAJIT = Path(json.loads((ROOT / 'lint-repos.json').read_text(encoding='utf-8'))['luajit'])
+LUAJIT = support.LUAJIT
 EXPECT_RE = re.compile(r'expect:\s*((?:R\d+\s*)+)')
 
 
@@ -49,7 +48,7 @@ def run(*argv: str) -> tuple[int, str]:
     return code, out.getvalue() + err.getvalue()
 
 
-@unittest.skipUnless(LUAJIT.is_file(), f'workspace LuaJIT not found: {LUAJIT}')
+@support.needs_luajit
 class RuleTests(unittest.TestCase):
     def test_sources_report_exactly_the_marked_lines(self):
         result = lint.scan([fixture_repo()], LUAJIT, include_tests=False)
@@ -120,10 +119,10 @@ class RuleTests(unittest.TestCase):
                                     'second: __asm__ label repeats the global name'])
 
 
-@unittest.skipUnless(LUAJIT.is_file(), f'workspace LuaJIT not found: {LUAJIT}')
+@support.needs_luajit
 class BaselineTests(unittest.TestCase):
     def setUp(self):
-        self.temp = Path(tempfile.mkdtemp(prefix='resilience-lint-'))
+        self.temp = Path(tempfile.mkdtemp(prefix='bingus-lint-'))
         self.repo = self.temp / 'sample_mod'
         shutil.copytree(FIXTURE, self.repo)
         self.config = self.temp / 'repos.json'

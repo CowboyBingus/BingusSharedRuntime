@@ -94,13 +94,15 @@ python lint.py update --allow-increase   # accept increases: the first baseline,
 Options:
 - `--tests` also lints `tests/` (rules R1-R7).
 - `--repo NAME=PATH` lints another checkout against the baseline, e.g.
-  `--repo ShallowWaterDiving=publication\resilience-v1\checkouts\ShallowWaterDiving`.
+  `--repo ShallowWaterDiving=../ShallowWaterDiving` (a path relative to the current folder).
   Repeat it for each repo of a release. Before the release, `check` must show no NEW line for
   those repos, or each one must be reviewed and accepted. The baseline follows the published
   checkouts. After publishing, point `lint-repos.json` at the new release checkouts and run
   `update`; accepted increases, such as a file that grew, need `--allow-increase`.
 - `--only NAME` limits the scan, the check and the update to these repos.
-- `--config`, `--baseline` and `--luajit` choose other files.
+- `--config`, `--baseline` and `--luajit` choose other files; `BINGUS_LUAJIT` also sets LuaJIT.
+- `--workspace PATH` sets the folder that relative paths in `lint-repos.json` start from (default:
+  `BINGUS_WORKSPACE`, else the folder that holds this repository).
 
 The baseline identity is (repo, kind, file, rule, line text with whitespace collapsed). Editing a
 violating line gives it a new identity: `check` reports it as NEW and the old line as "fixed - run
@@ -205,6 +207,5 @@ python -m unittest discover -s tests -v
   frame, write checks against read-only, executable, image and split regions, the session hash
   cache, and the guard against hostile neighbours (`throw_below`, `double_call`, `drop_args`,
   `rehook`). Nine mutations of the runtime are all caught in both VMs.
-- `test_hostile_vm.py` runs `tests/test_hostile_vm.lua` twice: in the workspace LuaJIT, and in the
-  installed game's `lua51.dll` through `PerformanceBaseline/game_lua.py`. The game is never
-  started.
+- `test_hostile_vm.py` runs `tests/test_hostile_vm.lua` twice: in a LuaJIT executable, and in the
+  installed game's `lua51.dll` through `game_lua.py`. The game is never started.

@@ -1,6 +1,6 @@
--- Tests for hostile_vm.lua; must pass in the workspace LuaJIT and in the game's lua51.dll:
+-- Tests for hostile_vm.lua; must pass in a LuaJIT 2.1 executable and in the game's lua51.dll:
 --   luajit tests/test_hostile_vm.lua [path/to/hostile_vm.lua]
---   python -B ../PerformanceBaseline/game_lua.py tests/test_hostile_vm.lua [path/to/hostile_vm.lua]
+--   python -B game_lua.py tests/test_hostile_vm.lua [path/to/hostile_vm.lua]
 -- A failure raises an error (game_lua.py then prints "ERROR:" and exits 1).
 local here = (arg and arg[0] or ''):match('^(.*)[/\\][^/\\]*$') or '.'
 local H = dofile(arg and arg[1] or (here .. '/../hostile_vm.lua'))

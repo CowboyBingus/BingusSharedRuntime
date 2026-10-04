@@ -1,7 +1,7 @@
 """Tests for metrics.py: cognitive complexity against SonarSource's examples, LuaJIT's local
 count, function facts and duplicated-code regions.
 
-Run: python -m unittest discover -s tests -v   (from the Resilience folder)
+Run: python -m unittest discover -s tests -v   (from the repository folder)
 """
 import sys
 import unittest

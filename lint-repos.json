@@ -1,5 +1,5 @@
 {
-  "note": "Repos scanned by lint.py: latest published code, read only. sources/tests are globs relative to path; allowed_globals are the mod's own namespace globals (update, shutdown and render are always allowed). locales/*.lua and the loader's example ship in the release and run in the game's Lua state, so they count as sources.",
+  "note": "Repos scanned by lint.py: latest published code, read only. path and luajit are relative to the workspace: the folder that holds this repository, or --workspace / BINGUS_WORKSPACE. sources/tests are globs relative to path; allowed_globals are the mod's own namespace globals (update, shutdown and render are always allowed). locales/*.lua and the loader's example ship in the release and run in the game's Lua state, so they count as sources.",
   "luajit": "tools/src/LuaJIT/src/luajit.exe",
   "default_sources": ["src/**/*.lua"],
   "default_tests": ["tests/**/*.lua"],
