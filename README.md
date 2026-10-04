@@ -179,7 +179,8 @@ api; each api keeps its own buffers and counters.
 | `verify_build({exe_sha256, game_sha256})` | `true`, or `false` and `'game modules unavailable'` or `'unsupported game build'`. |
 | `native` | `{ffi, kernel32, bcrypt}`: the bound functions under their Windows names, for calls the api does not cover. |
 
-`read` and `read_into` take a pointer; the other calls also take numbers.
+`read` and `read_into` take a pointer (`nil` reads nothing); `address`, `distance` and
+`writable_data` also take numbers.
 
 ### bingus_write.lua: checked writes
 
@@ -208,7 +209,7 @@ In-game costs come from measurements in real play. Calls without one are marked 
 | `write_batch` | `writable_data` once, then 1 `WriteProcessMemory` per change | as `write` | one pointer per call and per change in interpreted code |
 | `time` | 1 `QueryPerformanceCounter` | unmeasured in game | none |
 | `address`, `distance` | none | no system call | none |
-| `module_hash` | the first call per module and session reads the module file; later calls look up the cache | once per session | buffers on the first call |
+| `module_hash` | 1 `GetModuleFileNameW`; the first call per module and session also reads and hashes the module file | once per session | a 64 KB path buffer per call, and 1 MB while a file is read |
 
 "None" means 0 bytes, interpreted and compiled, pinned by the tests. A page check costs about 2% of
 a 60 FPS frame, so check pages only on frames that write, right before the write.
@@ -250,10 +251,10 @@ assert(H.ctype_growth(env.update, 1 / 60) == 0, 'C types created per frame')
 ### game_lua.py
 
 `python game_lua.py <file.lua> [args...]` loads the game's `lua51.dll` into a Python process and runs
-the file in a fresh Lua state with the standard libraries. The game is never started. Paths among the
-arguments are made absolute, what the file prints is printed at the end, and an error prints
-`ERROR: <message>` and exits with 1. The DLL comes from `HD2_LUA51_DLL`, else Steam's default
-install folder. Use it to check FFI behaviour, garbage and compiled code in the game's own VM, which
+the file in a fresh Lua state with the standard libraries. The game is never started. Arguments that
+name an existing file or folder are made absolute, what the file prints is printed at the end, and an
+error prints `ERROR: <message>` and exits with 1. The DLL comes from `HD2_LUA51_DLL`, else Steam's
+default install folder. Use it to check FFI behaviour, garbage and compiled code in the game's own VM, which
 differs from current LuaJIT builds (for example, it has no trace stitching).
 
 ## Lint
@@ -408,7 +409,7 @@ Steam's default install folder). A missing VM skips its tests.
     for `read_into`, `writable_data`, `address`, `distance` and `time`, interpreted and compiled,
     the Windows calls per call, and no C types per call or per copy.
   - `test_write.lua`: writes and refusals on read-only, guard, executable, image and unmapped
-    pages; batches; one page query per region.
+    pages; batches; one page query per region; 0 bytes of garbage per write.
   - `test_together.lua`: two copies of each file, a copy of a second version beside them, guards of
     every copy on one chain, and a typical guarded loop that allocates nothing across JIT flushes
     and a hostile GC pause.
@@ -424,7 +425,7 @@ Steam's default install folder). A missing VM skips its tests.
   scores 7), boolean runs, nesting, recursion and closures, LuaJIT's local count with hidden `for`
   variables, and duplicated-code regions.
 
-Each runtime test was checked against deliberate bugs: 39 mutations of the three files, each one
+Each runtime test was checked against deliberate bugs: 40 mutations of the three files, each one
 caught in both VMs.
 
 **AI disclosure:** Claude Opus 5.5 assisted with research, implementation, tests and documentation.

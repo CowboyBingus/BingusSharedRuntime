@@ -132,6 +132,24 @@ local growth = H.ctype_growth(function()
 end)
 check('no C types created per call', growth == 0, growth)
 
+do -- a write allocates nothing: the median of three windows after a warm-up,
+   -- interpreted (JIT off and flushed) and compiled
+    local flush, target = H.jit_churn(), data + 400
+    local function writes() for _ = 1, 2000 do api.write(target, '\1\2\3\4') end end
+    for _, compiled in ipairs({false, true}) do
+        flush()
+        if not compiled then jit.off() end
+        writes(); writes()
+        local windows = {}
+        for i = 1, 3 do windows[i] = H.heap_peak(writes) * 1024 end
+        jit.on()
+        table.sort(windows)
+        check('a write allocates nothing' .. (compiled and ' (compiled)' or ' (interpreted)'), windows[2] == 0,
+            windows[2] .. ' B')
+    end
+    check('and the writes landed', data[400] == 1 and data[403] == 4)
+end
+
 for _, block in ipairs(blocks) do kernel.rtw_VirtualFree(block, 0, 0x8000) end
 
 print('bingus_write: ' .. passed .. ' checks passed (' .. jit.version .. ')')
