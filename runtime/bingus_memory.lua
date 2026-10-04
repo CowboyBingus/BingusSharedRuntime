@@ -38,7 +38,7 @@
 --   api.module_hash(module)        SHA-256 (uppercase hex) of the module's file, read
 --                                  once per session for every mod (BingusRuntime.hashes)
 --   api.verify_build(build)        build = {exe_sha256, game_sha256}: true, or false and why
---   api.native                     {ffi, kernel32, bcrypt}: the bound functions under
+--   api.windows                    {ffi, kernel32, bcrypt}: the bound functions under
 --                                  their Windows names, for calls the api does not cover
 -- Addresses are pointer cdata (read, read_into) or pointers, numbers and integer
 -- cdata (address, distance, writable_data).
@@ -127,8 +127,8 @@ end
 -- Module files ---------------------------------------------------------------------
 
 -- SHA-256 (uppercase hex) of the file at path (a UTF-16 string buffer).
-local function sha256(native, path)
-    local ffi, kernel, bcrypt = native.ffi, native.kernel32, native.bcrypt
+local function sha256(windows, path)
+    local ffi, kernel, bcrypt = windows.ffi, windows.kernel32, windows.bcrypt
     local file = kernel.CreateFileW(path, 0x80000000, 7, nil, 3, 0x08000000, nil)
     if file == ffi.cast('void *', -1) then error('cannot read the module file', 0) end
     local algorithm, hash = ffi.new('void *[1]'), ffi.new('void *[1]')
@@ -158,16 +158,16 @@ end
 
 -- The SHA-256 of a loaded module's file, read once per session for every mod:
 -- kept in the shared table by file path.
-local function module_hash(runtime, native, module)
-    local ffi = native.ffi
+local function module_hash(runtime, windows, module)
+    local ffi = windows.ffi
     local path = ffi.new('uint16_t[32768]')
-    local length = native.kernel32.GetModuleFileNameW(module, path, 32768)
+    local length = windows.kernel32.GetModuleFileNameW(module, path, 32768)
     if length == 0 or length >= 32768 then error('module file name unavailable', 0) end
     local shared = runtime.shared()
     local key = 'sha256:' .. ffi.string(path, length * 2)
     local cached = shared.hashes[key]
     if cached then return cached end
-    local hex = sha256(native, path)
+    local hex = sha256(windows, path)
     shared.hash_reads = shared.hash_reads + 1
     shared.hashes[key] = hex
     return hex
@@ -180,8 +180,8 @@ function memory.new(runtime)
         error('bingus_memory.lua: new(runtime) needs the table bingus_runtime.lua returns', 2)
     end
     runtime.shared()
-    local native = bind()
-    local ffi, kernel = native.ffi, native.kernel32
+    local windows = bind()
+    local ffi, kernel = windows.ffi, windows.kernel32
     local read_memory, query, query_counter = kernel.ReadProcessMemory, kernel.VirtualQuery,
         kernel.QueryPerformanceCounter
     local process = kernel.GetCurrentProcess()
@@ -195,7 +195,7 @@ function memory.new(runtime)
     local scratch_size = 256
     local scratch = ffi.new('uint8_t[?]', scratch_size)
     local ticks = ticks_per_second
-    local api = {queries = 0, native = native}
+    local api = {queries = 0, windows = windows}
 
     -- A pointer, number or integer cdata as a number, without allocating: a
     -- pointer passes through the cell. Exact below 2^53 (user-mode addresses
@@ -279,7 +279,7 @@ function memory.new(runtime)
     end
 
     function api.module_hash(module)
-        return module_hash(runtime, native, module)
+        return module_hash(runtime, windows, module)
     end
 
     -- build: {exe_sha256, game_sha256}. true, or false and why.

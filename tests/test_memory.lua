@@ -67,11 +67,11 @@ local NAMES = {'GetModuleHandleA', 'GetModuleFileNameW', 'GetCurrentProcess', 'R
                'BCryptFinishHash', 'BCryptDestroyHash'}
 for _, name in ipairs(NAMES) do
     check('no plain declaration of ' .. name, not pcall(function() return ffi.C[name] end))
-    local library = name:find('^BCrypt') and api.native.bcrypt or api.native.kernel32
+    local library = name:find('^BCrypt') and api.windows.bcrypt or api.windows.kernel32
     check('bound: ' .. name, type(library[name]) == 'cdata')
 end
-check('the native table', api.native.ffi == ffi and api3.native == api.native and api2.native ~= api.native)
-check('the read side binds no write function', api.native.kernel32.WriteProcessMemory == nil
+check('the windows table', api.windows.ffi == ffi and api3.windows == api.windows and api2.windows ~= api.windows)
+check('the read side binds no write function', api.windows.kernel32.WriteProcessMemory == nil
     and api.write == nil and api.write_batch == nil)
 check('the shared table records the core version', runtime.shared().versions[1] == true)
 
@@ -144,7 +144,7 @@ local region, image_data = ffi.new('bingus_memory1_region'), nil
 do
     local cursor, image = api.address(exe), api.address(exe)
     for _ = 1, 64 do
-        if api.native.kernel32.VirtualQuery(cursor, region, ffi.sizeof(region)) == 0 then break end
+        if api.windows.kernel32.VirtualQuery(cursor, region, ffi.sizeof(region)) == 0 then break end
         local allocation = region.allocation_base_low + region.allocation_base_high * 4294967296
         if allocation ~= image then break end
         if region.protection == 4 or region.protection == 8 then image_data = cursor; break end
@@ -217,9 +217,9 @@ do -- read allocates only the string it returns: as much as making that string d
     check('the reads were real', kept ~= nil and #kept == 8)
 end
 
-do -- Windows calls per call: counting wrappers in the native table, in place
+do -- Windows calls per call: counting wrappers in the windows table, in place
    -- before the api is created and while it is called
-    local kernel32, calls, real = api.native.kernel32, {}, {}
+    local kernel32, calls, real = api.windows.kernel32, {}, {}
     for _, name in ipairs({'ReadProcessMemory', 'VirtualQuery', 'QueryPerformanceCounter', 'QueryPerformanceFrequency'}) do
         real[name], calls[name] = kernel32[name], 0
         kernel32[name] = function(...) calls[name] = calls[name] + 1; return real[name](...) end
@@ -263,7 +263,7 @@ check('the same session result for another copy', api2.module_hash(exe) == exe_s
     and memory_lib2.new(runtime).module_hash(exe) == exe_sha256 and shared.hash_reads == reads + 1)
 do -- the key: 'sha256:' and the module's UTF-16 file path
     local path = ffi.new('uint16_t[32768]')
-    local length = api.native.kernel32.GetModuleFileNameW(exe, path, 32768)
+    local length = api.windows.kernel32.GetModuleFileNameW(exe, path, 32768)
     check('the cache key format', shared.hashes['sha256:' .. ffi.string(path, length * 2)] == exe_sha256)
 end
 local verified, why = api.verify_build({exe_sha256 = exe_sha256, game_sha256 = 'x'})

@@ -15,7 +15,7 @@
 --                                        under one check: changes = {{offset, bytes},
 --                                        ...}. true and the count, or false and how
 --                                        many writes landed, so the caller can undo them
---   api.native.kernel32.WriteProcessMemory, bound like the read-side functions
+--   api.windows.kernel32.WriteProcessMemory, bound like the read-side functions
 -- write takes a pointer cdata; write_batch a pointer or a number.
 --
 -- Writes go only into memory that is already committed, private and read-write:
@@ -48,11 +48,11 @@ local function bind(ffi)
 end
 
 function write.extend(api)
-    if type(api) ~= 'table' or type(api.writable_data) ~= 'function' or type(api.native) ~= 'table' then
+    if type(api) ~= 'table' or type(api.writable_data) ~= 'function' or type(api.windows) ~= 'table' then
         error('bingus_write.lua: extend(api) needs an api from bingus_memory.lua', 2)
     end
-    local native = api.native
-    local ffi, kernel = native.ffi, native.kernel32
+    local windows = api.windows
+    local ffi, kernel = windows.ffi, windows.kernel32
     local write_memory = bind(ffi)
     kernel.WriteProcessMemory = write_memory
     local process = kernel.GetCurrentProcess()

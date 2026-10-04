@@ -177,7 +177,7 @@ api; each api keeps its own buffers and counters.
 | `module([name])` | A loaded module's base as `uint8_t *`, or `nil`; no name: the executable. |
 | `module_hash(module)` | The SHA-256 (uppercase hex) of the module's file, read once per session for every mod. |
 | `verify_build({exe_sha256, game_sha256})` | `true`, or `false` and `'game modules unavailable'` or `'unsupported game build'`. |
-| `native` | `{ffi, kernel32, bcrypt}`: the bound functions under their Windows names, for calls the api does not cover. |
+| `windows` | `{ffi, kernel32, bcrypt}`: the bound functions under their Windows names, for calls the api does not cover. |
 
 `read` and `read_into` take a pointer (`nil` reads nothing); `address`, `distance` and
 `writable_data` also take numbers.
@@ -193,7 +193,7 @@ api; each api keeps its own buffers and counters.
 
 Each write checks its whole range with `api.writable_data` right before writing, and refuses
 anything but committed private read-write memory. Nothing in the runtime changes page protection
-or allocates memory pages. `api.native.kernel32.WriteProcessMemory` is bound as well.
+or allocates memory pages. `api.windows.kernel32.WriteProcessMemory` is bound as well.
 
 ### Per-frame cost
 

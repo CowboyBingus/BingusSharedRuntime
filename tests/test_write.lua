@@ -45,10 +45,17 @@ local reader = memory_lib.new(runtime)
 local api = memory_lib.new(runtime)
 check('extend returns the api it extended', write_lib.extend(api) == api)
 check('write and write_batch added', type(api.write) == 'function' and type(api.write_batch) == 'function')
-check('the write function is bound under its Windows name', type(api.native.kernel32.WriteProcessMemory) == 'cdata')
+check('the write function is bound under its Windows name', type(api.windows.kernel32.WriteProcessMemory) == 'cdata')
 check('the sentinel type exists', pcall(ffi.typeof, 'bingus_write1_declared'))
 check('no plain declaration of WriteProcessMemory', not pcall(function() return ffi.C.WriteProcessMemory end))
 check('an api that was not extended cannot write', reader.write == nil and reader.write_batch == nil)
+do -- a mod may add its own fields to the api it gets, such as its own native bindings
+    local own = memory_lib.new(runtime)
+    function own.native() return 'the mod\'s bindings' end
+    function own.time() return 42 end
+    check('extending keeps a mod\'s own fields', write_lib.extend(own) == own and own.native() == 'the mod\'s bindings'
+        and own.time() == 42 and type(own.write) == 'function' and type(own.windows.kernel32.WriteProcessMemory) == 'cdata')
+end
 local other
 local growth = H.ctype_growth(function() other = write_lib2.extend(memory_lib.new(runtime)) end)
 check('a second copy extends without redeclaring', type(other.write) == 'function' and other.write ~= api.write)
@@ -88,7 +95,7 @@ local guarded = allocate(1, 0x104)
 check('a guard page refused', not api.write(guarded, '\1'))
 do -- and untouched: touching a guard page clears its guard flag
     local region = ffi.new('bingus_memory1_region')
-    check('the guard page keeps its guard', api.native.kernel32.VirtualQuery(api.address(guarded), region,
+    check('the guard page keeps its guard', api.windows.kernel32.VirtualQuery(api.address(guarded), region,
         ffi.sizeof(region)) ~= 0 and region.protection == 0x104, region.protection)
 end
 local code = allocate(1, 0x40)
