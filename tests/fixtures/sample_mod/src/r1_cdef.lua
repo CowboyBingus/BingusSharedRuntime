@@ -22,4 +22,13 @@ ffi.cdef('int CloseHandle(void *handle); /* -- lint-ok: R1 fixture: suppressed o
 local generated = make_declarations()
 ffi.cdef(generated) -- expect: R1 (not a literal)
 ffi.cdef 'typedef union { float f; uint32_t u; } SampleBits;'
+-- Shared type names: the first definition in the game wins, a later layout is ignored.
+ffi.cdef [[
+    typedef struct { void *base; uint32_t protect; } MEMORY_BASIC_INFORMATION; /* expect: R1 */
+    typedef unsigned char uint8_t; /* expect: R1 */
+    struct tagPOINT { long x; long y; }; /* expect: R1 */
+    typedef struct { long x; long y; } sample_point_t;
+    typedef int (*sample_visit_t)(int value);
+    struct sample_region { void *base; size_t size; };
+]]
 return ffi

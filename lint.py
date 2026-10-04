@@ -454,6 +454,62 @@ def _function_name(declarator: str) -> tuple[str, int] | None:
 ATTRIBUTE_RE = re.compile(r'\b(?:__attribute__|__declspec)\s*\(')
 
 
+# C and Windows type names that several mods would declare. ffi.cdef keeps the first definition of a
+# type name for the whole game and silently ignores a later one with another layout (verified in both
+# VMs), so a mod declaring one of these may get another mod's layout. Struct tags count with a `_` or
+# `tag` prefix (`struct _MEMORY_BASIC_INFORMATION`, `struct tagPOINT`).
+SHARED_TYPE_NAMES = frozenset((
+    'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
+    'intptr_t', 'uintptr_t', 'ptrdiff_t', 'size_t', 'ssize_t', 'wchar_t', 'bool',
+    'BYTE', 'WORD', 'DWORD', 'QWORD', 'BOOL', 'BOOLEAN', 'CHAR', 'WCHAR', 'UINT', 'ULONG', 'LONG',
+    'LONGLONG', 'ULONGLONG', 'ULONG_PTR', 'LONG_PTR', 'DWORD_PTR', 'UINT_PTR', 'SIZE_T', 'SSIZE_T',
+    'HANDLE', 'HMODULE', 'HINSTANCE', 'HWND', 'HDC', 'HBITMAP', 'HGDIOBJ', 'LPVOID', 'LPCVOID', 'PVOID',
+    'LPSTR', 'LPCSTR', 'LPWSTR', 'LPCWSTR', 'NTSTATUS', 'MEMORY_BASIC_INFORMATION',
+    'PMEMORY_BASIC_INFORMATION', 'POINT', 'RECT', 'SIZE', 'BITMAPINFO', 'BITMAPINFOHEADER', 'RGBQUAD',
+    'INPUT', 'MOUSEINPUT', 'KEYBDINPUT', 'HARDWAREINPUT', 'FILETIME', 'SYSTEMTIME', 'LARGE_INTEGER',
+    'GUID', 'OVERLAPPED', 'SECURITY_ATTRIBUTES', 'WIN32_FIND_DATAA', 'WIN32_FIND_DATAW', 'MODULEINFO',
+    'PROCESS_MEMORY_COUNTERS', 'LUID', 'SYSTEM_INFO', 'MSG', 'WNDCLASSEXA', 'WNDCLASSEXW',
+    'CRITICAL_SECTION'))
+STRUCT_TAG_RE = re.compile(r'\b(?:struct|union|enum)\s+([A-Za-z_]\w*)')
+POINTER_TYPEDEF_RE = re.compile(r'\(\s*\*\s*([A-Za-z_]\w*)\s*\)')
+LAST_NAME_RE = re.compile(r'([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*$')
+
+
+def _shared_type(name: str, tag: bool) -> bool:
+    if name in SHARED_TYPE_NAMES:
+        return True
+    bare = name[1:] if name.startswith('_') else name[3:] if name.startswith('tag') else None
+    return tag and bare in SHARED_TYPE_NAMES
+
+
+def _typedef_names(declaration: str):
+    """(name, offset) for each name a typedef declares."""
+    body = _blank_groups(declaration, '{', '}')
+    pointer = POINTER_TYPEDEF_RE.search(body)
+    if pointer:
+        return [(pointer.group(1), pointer.start(1))]
+    names = []
+    for part, part_offset in _split_top(body, ','):
+        found = LAST_NAME_RE.search(part)
+        if found and found.group(1) != 'typedef':
+            names.append((found.group(1), part_offset + found.start(1)))
+    return names
+
+
+def c_shared_types(text: str):
+    """Yields (name, offset, problem) for each typedef or struct tag that uses a shared type name."""
+    clean = C_COMMENT_RE.sub(lambda m: ''.join('\n' if ch == '\n' else ' ' for ch in m.group()), text)
+    for declaration, offset in _split_top(clean, ';'):
+        found = [(name, at, True) for name, at in
+                 ((m.group(1), m.start(1)) for m in STRUCT_TAG_RE.finditer(declaration))]
+        if re.match(r'\s*typedef\b', declaration):
+            found += [(name, at, False) for name, at in _typedef_names(declaration)]
+        for name, at, tag in found:
+            if _shared_type(name, tag):
+                yield name, offset + at, (f'{name}: shared type name; the first definition in the game wins '
+                                          'and a later layout is silently ignored (use a private name)')
+
+
 def c_prototypes(text: str):
     """Yields (name, offset, problem) for each function prototype without a private __asm__ label."""
     clean = C_COMMENT_RE.sub(lambda m: ''.join('\n' if ch == '\n' else ' ' for ch in m.group()), text)
@@ -579,6 +635,8 @@ def rule_cdef(source: Source, calls: list[Call]) -> list[Finding]:
             continue
         for declarations in texts:
             for _name, offset, problem in c_prototypes(declarations.text):
+                found.append(('R1', declarations.line_of(offset), problem))
+            for _name, offset, problem in c_shared_types(declarations.text):
                 found.append(('R1', declarations.line_of(offset), problem))
     return found
 
