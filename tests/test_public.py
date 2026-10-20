@@ -40,7 +40,7 @@ class PublicRepository(unittest.TestCase):
     def test_license_is_zero_clause_bsd(self):
         # 0BSD: use, copy, modify and distribute for any purpose, no conditions.
         text = (support.ROOT / 'LICENSE').read_text(encoding='utf-8')
-        self.assertIn('Zero-Clause BSD', text)
+        self.assertIn('BSD Zero Clause License', text)
         self.assertIn('Copyright (C) 2026 by CowboyBingus', text)
 
 
